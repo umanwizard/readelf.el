@@ -211,8 +211,8 @@
          ;; TODO - is there a way to avoid reading the
          ;; whole file into a buffer?
          ;;
-         ;; Also, how do we avoid this being visible to the user?
-         (fbuf (generate-new-buffer filename t)))
+         ;; Also, clean this up when the main buffer goes away
+         (fbuf (generate-new-buffer " *readelf internal*" t)))
     (let ((h (with-current-buffer fbuf
                (set-buffer-multibyte nil)
                (let ((coding-system-for-read 'binary))
