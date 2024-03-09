@@ -57,19 +57,19 @@
       (bindat-unpack readelf-le64-header-bindat-spec header-bytes)))
 
 (defun readelf-validate-header (h)
-  (unless (= (bindat-get-field h 'magic) readelf-magic)
+  (unless (= (cdr (assq 'magic h)) readelf-magic)
     (error "bad elf magic"))
-  (unless (= (bindat-get-field h 'class) readelf-elfclass64)
+  (unless (= (cdr (assq 'class h)) readelf-elfclass64)
     (error "only 64-bit elf files supported"))
-  (unless (= (bindat-get-field h 'data) readelf-elfdata2lsb)
+  (unless (= (cdr (assq 'data h)) readelf-elfdata2lsb)
     (error "only LE elf files supported"))
-  (unless (= (bindat-get-field h 'identversion) readelf-ev-current)
+  (unless (= (cdr (assq 'identversion h)) readelf-ev-current)
     (error "bad elf ident version"))
-  (unless (= (bindat-get-field h 'ehsize) 64)
+  (unless (= (cdr (assq 'ehsize h)) 64)
     (error "bad elf header size"))
-  (unless (>= (bindat-get-field h 'phentsize) 56)
+  (unless (>= (cdr (assq 'phentsize h)) 56)
     (error "bad ph entry size"))
-  (unless (>= (bindat-get-field h 'shentsize) 64)
+  (unless (>= (cdr (assq 'shentsize h)) 64)
     (error "bad sh entry size"))
   h)
 
@@ -157,20 +157,20 @@
 
 
 (defun readelf--pp-phdr (phdr)
-  (let ((type (bindat-get-field phdr 'type)))
+  (let ((type (cdr (assq 'type phdr))))
     (insert "phdr of type: " (or (readelf--p_type-name type) (format "0x%x" type)) "\n")))
 
 
 (defun readelf--pp-shdr (shdr getstr)
-  (let ((type (bindat-get-field shdr 'type)))
+  (let ((type (cdr (assq 'type shdr))))
     (when (/= type readelf--sh_type/SHT_NULL)
-      (let ((name (funcall getstr (bindat-get-field shdr 'name))))
+      (let ((name (funcall getstr (cdr (assq 'name shdr)))))
         (insert "shdr: " name " type: " (or (readelf--sh_type-name type) (format "0x%x" type)) "\n")))))
 
 (defun readelf--get-phdrs (h)
-  (let ((phnum (bindat-get-field h 'phnum))
-        (phoff (bindat-get-field h 'phoff))
-        (phentsize (bindat-get-field h 'phentsize)))
+  (let ((phnum (cdr (assq 'phnum h)))
+        (phoff (cdr (assq 'phoff h)))
+        (phentsize (cdr (assq 'phentsize h))))
     (when (= phnum #xffff)
       (error "PH_XNUM not yet supported"))
     (mapcar
@@ -182,9 +182,9 @@
      (number-sequence 0 (1- phnum)))))
 
 (defun readelf--get-shdrs (h)
-  (let ((shnum (bindat-get-field h 'shnum))
-        (shoff (bindat-get-field h 'shoff))
-        (shentsize (bindat-get-field h 'shentsize)))
+  (let ((shnum (cdr (assq 'shnum h)))
+        (shoff (cdr (assq 'shoff h)))
+        (shentsize (cdr (assq 'shentsize h))))
     (when (>= shnum #xff00)
       (error "SHN_LORESERVE not yet supported"))
     (mapcar
@@ -228,11 +228,9 @@
         
         (let* ((print-length nil)
               (inhibit-read-only t)
-              (shstrndx (bindat-get-field h 'shstrndx))
+              (shstrndx (cdr (assq 'shstrndx h)))
               (shstrbase
-               (bindat-get-field
-                (nth shstrndx readelf-shdrs)
-                'offset)))
+               (cdr (assq 'offset (nth shstrndx readelf-shdrs)))))
           (pp h buf)
           (dolist (phdr readelf-phdrs)
             (readelf--pp-phdr phdr))
