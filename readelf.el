@@ -161,39 +161,51 @@
     (insert "phdr of type: " (or (readelf--p_type-name type) (format "0x%x" type)) "\n")))
 
 
-(defun readelf--pp-shdr (shdr getstr)
-  (let ((type (cdr (assq 'type shdr))))
+(defun readelf--pp-shdr (shdr)
+  (let ((type (alist-get 'type shdr)))
     (when (/= type readelf--sh_type/SHT_NULL)
-      (let ((name (funcall getstr (cdr (assq 'name shdr)))))
+      (let ((name (alist-get 'name shdr)))
         (insert "shdr: " name " type: " (or (readelf--sh_type-name type) (format "0x%x" type)) "\n")))))
 
-(defun readelf--get-phdrs (h)
-  (let ((phnum (cdr (assq 'phnum h)))
-        (phoff (cdr (assq 'phoff h)))
-        (phentsize (cdr (assq 'phentsize h))))
+(defun readelf--get-phdrs ()
+  (let ((phnum (cdr (assq 'phnum readelf-header)))
+        (phoff (cdr (assq 'phoff readelf-header)))
+        (phentsize (cdr (assq 'phentsize readelf-header))))
     (when (= phnum #xffff)
       (error "PH_XNUM not yet supported"))
     (mapcar
      (lambda (i)
        (let* ((offset (+ phoff (* i phentsize)))
               (phdr
-               (buffer-substring-no-properties (+ offset 1) (+ offset phentsize 1))))
+               (with-current-buffer readelf-fbuf
+                 (buffer-substring-no-properties (+ offset 1) (+ offset phentsize 1)))))
          (bindat-unpack readelf-le64-phdr-bindat-spec phdr)))
      (number-sequence 0 (1- phnum)))))
 
-(defun readelf--get-shdrs (h)
-  (let ((shnum (cdr (assq 'shnum h)))
-        (shoff (cdr (assq 'shoff h)))
-        (shentsize (cdr (assq 'shentsize h))))
+(defun readelf--get-shdrs ()
+  (let ((shnum (cdr (assq 'shnum readelf-header)))
+        (shoff (cdr (assq 'shoff readelf-header)))
+        (shentsize (cdr (assq 'shentsize readelf-header))))
     (when (>= shnum #xff00)
       (error "SHN_LORESERVE not yet supported"))
-    (mapcar
-     (lambda (i)
-       (let* ((offset (+ shoff (* i shentsize)))
-              (shdr
-               (buffer-substring-no-properties (+ offset 1) (+ offset shentsize 1))))
-         (bindat-unpack readelf-le64-shdr-bindat-spec shdr)))
-     (number-sequence 0 (1- shnum)))))
+    (let ((shdrs (mapcar
+                  (lambda (i)
+                    (let* ((offset (+ shoff (* i shentsize)))
+                           (shdr
+                            (with-current-buffer readelf-fbuf
+                              (buffer-substring-no-properties (+ offset 1) (+ offset shentsize 1)))))
+                      (bindat-unpack readelf-le64-shdr-bindat-spec shdr)))
+                  (number-sequence 0 (1- shnum)))))
+      (let* ((shstrndx (alist-get 'shstrndx h))
+             (shstrbase (bindat-get-field shdrs shstrndx 'offset)))
+        (dolist (shdr shdrs)
+          (when (/= (alist-get 'type shdr) readelf--sh_type/SHT_NULL)
+            (let* ((name (alist-get 'name shdr))
+                   (name-str
+                    (with-current-buffer readelf-fbuf
+                      (readelf--cstr (+ shstrbase name 1)))))
+              (setf (alist-get 'name shdr) name-str))))
+        shdrs))))
 
 ;; offset is 1-indexed!
 (defun readelf--cstr (offset)
@@ -221,10 +233,9 @@
       (with-current-buffer buf        
         (setq buffer-read-only t)
         (setq-local readelf-header h)
-        (setq-local readelf-phdrs
-                    (with-current-buffer fbuf (readelf--get-phdrs h)))
-        (setq-local readelf-shdrs
-                    (with-current-buffer fbuf (readelf--get-shdrs h)))
+        (setq-local readelf-fbuf fbuf)
+        (setq-local readelf-phdrs (readelf--get-phdrs))
+        (setq-local readelf-shdrs (readelf--get-shdrs))
         
         (let* ((print-length nil)
               (inhibit-read-only t)
@@ -235,8 +246,4 @@
           (dolist (phdr readelf-phdrs)
             (readelf--pp-phdr phdr))
           (dolist (shdr readelf-shdrs)
-            (readelf--pp-shdr
-             shdr
-             (lambda (offset)
-               (with-current-buffer fbuf
-                 (readelf--cstr (+ shstrbase offset 1)))))))))))
+            (readelf--pp-shdr shdr)))))))
