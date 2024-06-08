@@ -1,4 +1,5 @@
 (require 'bindat)
+(require 'dash)
 
 (defconst readelf-magic #x7f454c46)
 (defconst readelf-elfclass64 2)
@@ -57,6 +58,15 @@
     (namesz uint 32 t)
     (descsz uint 32 t)
     (type uint 32 t)))
+
+(defconst readelf-le64-sym-bindat-spec
+  (bindat-type
+    (name uint 32 t)
+    (info uint 8 t)
+    (other uint 8 t)
+    (shndx uint 16 t)
+    (value uint 64 t)
+    (size uint 64 t)))
 
 (defun readelf-get-header ()
     (let ((header-bytes (buffer-substring-no-properties 1 65)))
@@ -290,6 +300,30 @@
          rnotes (cons `(,name ,desc . ,type) rnotes))))
     (nreverse rnotes)))
 
+;; Reads the symbol string tab beginning
+;; at `idx' (1-indexed)
+(defun readelf--read-strtab-at (offset)
+  (let* ((sz (alist-get 'size readelf-strtab))
+         (max (1+ (- sz offset)))
+         (off (+ offset (alist-get 'offset readelf-strtab))))
+    (with-current-buffer readelf-fbuf (readelf--cstr off max))))
+
+(defun readelf--read-symtab (shdr)
+  (let ((cur (alist-get 'offset shdr))
+        (rem (alist-get 'size shdr))
+        rsyms)
+    (while (>= rem 24)
+      (let* ((s (with-current-buffer readelf-fbuf
+                  (buffer-substring-no-properties (+ cur 1) (+ cur 25))))
+             (sym (bindat-unpack readelf-le64-sym-bindat-spec s))
+             (nameidx (alist-get 'name sym))
+             (name (readelf--read-strtab-at (1+ nameidx))))
+        (setf (alist-get 'name sym) name)
+        (setq cur (+ cur 24))
+        (setq rem (- rem 24))
+        (setq rsyms `(,sym . ,rsyms))))
+    (nreverse rsyms)))
+
 (defun readelf--hex (bytes)
   (apply #'concat
          (mapcar
@@ -300,19 +334,28 @@
 (defun readelf--expand-pt-note (phdr)
   (unless (alist-get :notes phdr)
     (setf (alist-get :notes phdr) (readelf--read-pt-note phdr)))
-  (save-excursion
-    (goto-char (cdr (alist-get :header phdr)))
-    (dolist (note (alist-get :notes phdr))
-      (let* ((name (car note))
-             (desc (cadr note))
-             (type (cddr note))
-             (type-str
-              (cond
-               ((= (alist-get 'type readelf-header) readelf--e_type/ET_CORE)
-                (readelf--core_note_type-name type))
-               ((equal name "GNU") (readelf--gnu_note_type-name type))))
-             (inhibit-read-only t))
-        (insert "Note " name " of type " type-str ": " (readelf--hex desc) "\n")))))
+  (goto-char (cdr (alist-get :header phdr)))
+  (dolist (note (alist-get :notes phdr))
+    (let* ((name (car note))
+           (desc (cadr note))
+           (type (cddr note))
+           (type-str
+            (cond
+             ((= (alist-get 'type readelf-header) readelf--e_type/ET_CORE)
+              (readelf--core_note_type-name type))
+             ((equal name "GNU") (readelf--gnu_note_type-name type))))
+           (inhibit-read-only t))
+      (insert "Note " name " of type " type-str ": " (readelf--hex desc) "\n"))))
+
+(defun readelf--expand-symtab (shdr)
+  (unless (alist-get :syms shdr)
+    (setf (alist-get :syms shdr) (readelf--read-symtab shdr)))
+  (goto-char (cdr (alist-get :header shdr)))
+  (dolist (sym (alist-get :syms shdr))
+    (-let* (((&alist 'name 'index 'other 'shndx 'value 'size) sym))
+      ;; TODO - show section, filter irrelevant stuf,
+      ;; print symbol type, link to disassembly?
+      (insert (format "0x%08x\t%s\n" value name)))))
 
 (defun readelf--expander/phdr (phdr)
   (let ((type (alist-get 'type phdr)))
@@ -320,9 +363,11 @@
      ((= type readelf--p_type/PT_NOTE) 'readelf--expand-pt-note)
      (t nil))))
 
+
 (defun readelf--expander/shdr (shdr)
   (let ((type (alist-get 'type shdr)))
-    (cond     
+    (cond
+     ((= type readelf--sh_type/SHT_SYMTAB) 'readelf--expand-symtab)
      (t nil))))
 
 (defun readelf--pp-phdr (phdr)
@@ -375,7 +420,7 @@
                               (buffer-substring-no-properties (+ offset 1) (+ offset shentsize 1)))))
                       (bindat-unpack readelf-le64-shdr-bindat-spec shdr)))
                   (number-sequence 0 (1- shnum)))))
-      (let* ((shstrndx (alist-get 'shstrndx h))
+      (let* ((shstrndx (alist-get 'shstrndx readelf-header))
              (shstrbase (bindat-get-field shdrs shstrndx 'offset)))
         (dolist (shdr shdrs)
           (when (/= (alist-get 'type shdr) readelf--sh_type/SHT_NULL)
@@ -399,35 +444,92 @@
       (error "overflow"))
     (buffer-substring-no-properties offset end)))
 
+(defun readelf-toggle-expand ()
+  (interactive)
+  (let* ((p (get-text-property (point) :phdr))
+         (s (get-text-property (point) :shdr))
+         (x? (if p (readelf--expander/phdr p) (readelf--expander/shdr s)))
+         (g (or p s))
+         (xx (and g (alist-get :expanded-extent g)))
+         (hbegin (and g (car (alist-get :header g))))
+         (hend (and g (cdr (alist-get :header g))))
+         (inhibit-read-only t))
+    (when (and g x?)
+      (if xx
+          ;; We are already expanded, so collapse
+          (save-excursion
+            (delete-region hend xx)
+            (goto-char hbegin)
+            (delete-char 1)
+            (insert "+")
+            (put-text-property hbegin hend
+                               (if p :phdr :shdr)
+                               (assq-delete-all :expanded-extent g)))
+        (let ((xf (if p
+                      (readelf--expander/phdr p)
+                    (readelf--expander/shdr s))))
+          (save-excursion
+            (goto-char hbegin)
+            (delete-char 1)
+            (insert "-"))
+          (save-excursion
+            (funcall xf g)
+            (put-text-property hbegin hend
+                               (if p :phdr :shdr)
+                               (cons `(:expanded-extent . ,(point)) g))))))))
+
+(defvar readelf-mode-map
+  (let ((map (make-keymap)))
+    (suppress-keymap map t)
+    (keymap-set map "TAB" #'readelf-toggle-expand)
+    (keymap-set map "RET" #'readelf-toggle-expand)
+    map))
+
+(defun readelf--delete-fbuf ()
+  (kill-buffer readelf-fbuf))
+
+(define-derived-mode readelf-mode special-mode "Readelf Mode"
+  :interactive nil
+  (buffer-disable-undo)
+  (add-hook 'kill-buffer-hook #'readelf--delete-fbuf nil t)
+  (setq buffer-read-only t)
+  (let* ((fbuf
+          ;; TODO - is there a way to avoid reading the
+          ;; whole file into a buffer?
+          (generate-new-buffer " *readelf internal*" t))
+         (h (with-current-buffer fbuf
+              (set-buffer-multibyte nil)
+              (let ((coding-system-for-read 'binary))
+                (insert-file-contents-literally filename))
+              (readelf-validate-header (readelf-get-header)))))
+    (setq-local readelf-header h)
+    (setq-local readelf-fbuf fbuf))
+  (setq-local readelf-phdrs (readelf--get-phdrs))
+  (setq-local readelf-shdrs (readelf--get-shdrs))
+
+  (setq-local readelf-strtab
+              (cl-find-if
+               (lambda (shdr)
+                 (equal ".strtab"
+                        (alist-get 'name shdr)))
+               readelf-shdrs))
+  
+  (let* ((print-length nil)
+         (inhibit-read-only t)
+         (shstrndx (cdr (assq 'shstrndx readelf-header)))
+         (shstrbase
+          (cdr (assq 'offset (nth shstrndx readelf-shdrs)))))
+    (dolist (phdr readelf-phdrs)
+      (readelf--pp-phdr phdr))
+    (dolist (shdr readelf-shdrs)
+      (readelf--pp-shdr shdr))))
+
 (defun readelf (filename)
   (interactive
    (list(read-file-name
   	 "ELF file: " nil default-directory)))
   (let* ((bufname (format "*readelf* %s" filename))
-         (buf (generate-new-buffer bufname))
-         ;; TODO - is there a way to avoid reading the
-         ;; whole file into a buffer?
-         ;;
-         ;; Also, clean this up when the main buffer goes away
-         (fbuf (generate-new-buffer " *readelf internal*" t)))
-    (let ((h (with-current-buffer fbuf
-               (set-buffer-multibyte nil)
-               (let ((coding-system-for-read 'binary))
-                 (insert-file-contents-literally filename))
-               (readelf-validate-header (readelf-get-header)))))
-      (with-current-buffer buf        
-        (setq buffer-read-only t)
-        (setq-local readelf-header h)
-        (setq-local readelf-fbuf fbuf)
-        (setq-local readelf-phdrs (readelf--get-phdrs))
-        (setq-local readelf-shdrs (readelf--get-shdrs))
-        
-        (let* ((print-length nil)
-              (inhibit-read-only t)
-              (shstrndx (cdr (assq 'shstrndx h)))
-              (shstrbase
-               (cdr (assq 'offset (nth shstrndx readelf-shdrs)))))
-          (dolist (phdr readelf-phdrs)
-            (readelf--pp-phdr phdr))
-          (dolist (shdr readelf-shdrs)
-            (readelf--pp-shdr shdr)))))))
+         (buf (generate-new-buffer bufname)))
+    (with-current-buffer buf
+      (readelf-mode)      
+      (switch-to-buffer buf))))
