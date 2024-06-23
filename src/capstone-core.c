@@ -496,14 +496,14 @@ Fcall_cs_disasm(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data)
                     list_args[0] = _CS_INTERN("reg");
                     // TODO[btv] symbolic register names
                     list_args[1] = _CS_INT(op->reg);
-                    op_list = _CS_FUNCALL("list", list_args);
+                    op_list = _CS_FUNCALL("vector", list_args);
                 }
                     break;
                 case ARM64_OP_IMM: {
                     emacs_value list_args[2];
                     list_args[0] = _CS_INTERN("imm");
                     list_args[1] = _CS_INT(op->imm);
-                    op_list = _CS_FUNCALL("list", list_args);
+                    op_list = _CS_FUNCALL("vector", list_args);
                 }
                     break;
                 case ARM64_OP_MEM: {
@@ -512,7 +512,7 @@ Fcall_cs_disasm(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data)
                     list_args[1] = _CS_INT(op->mem.base);
                     list_args[2] = _CS_INT(op->mem.index);
                     list_args[3] = _CS_INT(op->mem.disp);
-                    op_list = _CS_FUNCALL("list", list_args);
+                    op_list = _CS_FUNCALL("vector", list_args);
                 }
                     break;
                 default:

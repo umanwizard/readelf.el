@@ -553,10 +553,10 @@
       (while (or p (< i (length o)))
         (let ((pn (car p))
               (on (and (< i (length o)) (elt o i))))
-          (if (not (eq pn (car on)))
+          (if (not (eq pn (elt on 0)))
               (setq fail t p nil o nil)
             (when (= i (or idx -1))
-              (setq found (cadr on))))
+              (setq found (elt on 1))))
           (setq p (cdr p) i (1+ i))))
       (and (not fail) found))))
 
