@@ -26,6 +26,7 @@
             (if (< target addr)
                 (setq r cand)
               (setq l cand)))))
+      (goto-char l)
       (beginning-of-line)
       (point))))
 

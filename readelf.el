@@ -1,9 +1,9 @@
 (provide 'readelf)
-
 (require 'bindat)
 (require 'dash)
 
 (require 'readelf-disasm)
+(require 'readelf-capstone)
 
 (defconst readelf-magic #x7f454c46)
 (defconst readelf-elfclass64 2)
@@ -81,9 +81,8 @@
      (let ((inhibit-read-only t))
        ,@body)))
 
-(defun readelf-get-header ()
-    (let ((header-bytes (buffer-substring-no-properties 1 65)))
-      (bindat-unpack readelf-le64-header-bindat-spec header-bytes)))
+(defun readelf-get-header (header-bytes)
+  (bindat-unpack readelf-le64-header-bindat-spec header-bytes))
 
 (defun readelf-validate-header (h)
   (unless (= (cdr (assq 'magic h)) readelf-magic)
@@ -111,14 +110,14 @@
                  `(defconst ,sym ,val)))
              names-and-values)
           (defun ,(intern (concat "readelf--" (symbol-name enum-name) "-name"))
-               (val)
-             (pcase val
-               ,@(mapcar
-                  (lambda (nv)
-                    (let* ((name (symbol-name (car nv)))
-                           (val (cadr nv)))
-                      `(,val ,name)))
-                  names-and-values)))))
+              (val)
+            (pcase val
+              ,@(mapcar
+                 (lambda (nv)
+                   (let* ((name (symbol-name (car nv)))
+                          (val (cadr nv)))
+                     `(,val ,name)))
+                 names-and-values)))))
 
 (readelf--mkenum symviz
                  (STV_DEFAULT 0)
@@ -305,8 +304,8 @@
         (rem (alist-get 'filesz phdr))
         rnotes)
     (while (>= rem 12)
-      (let* ((s (with-current-buffer readelf-fbuf
-                  (buffer-substring-no-properties (+ cur 1) (+ cur 13))))
+      (let* ((s (readelf--fread readelf-f
+                                cur 12))
              (nhdr (bindat-unpack readelf-le-nhdr-bindat-spec s))
              (namesz (alist-get 'namesz nhdr))
              (descsz (alist-get 'descsz nhdr))
@@ -317,16 +316,14 @@
          rem (- rem 12))
         (unless (>= rem namesz) (error "bad note"))
         (setq
-         name (with-current-buffer readelf-fbuf
-                (readelf--cstr (1+ cur) (1- namesz))))
+         name (readelf--cstr readelf-f cur (1- namesz)))
         (unless (= (length name) (1- namesz)) (error "bad note"))
         (setq
          cur (+ cur namesz)
          rem (- rem namesz))
         (unless (>= rem descsz) (error "bad note"))
         (setq
-         desc (with-current-buffer readelf-fbuf
-                (buffer-substring-no-properties (+ cur 1) (+ cur 1 descsz))))        
+         desc (readelf--fread readelf-f cur descsz))        
         (setq
          cur (+ cur descsz)
          rem (- rem descsz))
@@ -335,12 +332,12 @@
     (nreverse rnotes)))
 
 ;; Reads the symbol string tab beginning
-;; at `idx' (1-indexed)
+;; at `idx' (0-indexed)
 (defun readelf--read-strtab-at (offset)
   (let* ((sz (alist-get 'size readelf-strtab))
-         (max (1+ (- sz offset)))
+         (max (- sz offset))
          (off (+ offset (alist-get 'offset readelf-strtab))))
-    (with-current-buffer readelf-fbuf (readelf--cstr off max))))
+    (readelf--cstr readelf-f off max)))
 
 (defun readelf--read-symtab (shdr)
   (let ((cur (alist-get 'offset shdr))
@@ -348,11 +345,10 @@
         (n 0)
         rsyms)
     (while (>= rem 24)
-      (let* ((s (with-current-buffer readelf-fbuf
-                  (buffer-substring-no-properties (+ cur 1) (+ cur 25))))
+      (let* ((s (readelf--fread readelf-f cur 24))
              (sym (bindat-unpack readelf-le64-sym-bindat-spec s))
              (nameidx (alist-get 'name sym))
-             (name (readelf--read-strtab-at (1+ nameidx))))        
+             (name (readelf--read-strtab-at nameidx)))        
         (setq cur (+ cur 24))
         (setq rem (- rem 24))
         (setq n (1+ n))
@@ -455,9 +451,7 @@
     (mapcar
      (lambda (i)
        (let* ((offset (+ phoff (* i phentsize)))
-              (phdr
-               (with-current-buffer readelf-fbuf
-                 (buffer-substring-no-properties (+ offset 1) (+ offset phentsize 1)))))
+              (phdr (readelf--fread readelf-f offset phentsize)))
          (bindat-unpack readelf-le64-phdr-bindat-spec phdr)))
      (number-sequence 0 (1- phnum)))))
 
@@ -470,9 +464,7 @@
     (let ((shdrs (mapcar
                   (lambda (i)
                     (let* ((offset (+ shoff (* i shentsize)))
-                           (shdr
-                            (with-current-buffer readelf-fbuf
-                              (buffer-substring-no-properties (+ offset 1) (+ offset shentsize 1)))))
+                           (shdr (readelf--fread readelf-f offset shentsize)))
                       (bindat-unpack readelf-le64-shdr-bindat-spec shdr)))
                   (number-sequence 0 (1- shnum)))))
       (let* ((shstrndx (alist-get 'shstrndx readelf-header))
@@ -481,23 +473,22 @@
           (when (/= (alist-get 'type shdr) readelf--sh_type/SHT_NULL)
             (let* ((name (alist-get 'name shdr))
                    (name-str
-                    (with-current-buffer readelf-fbuf
-                      (readelf--cstr (+ shstrbase name 1)))))
+                    (readelf--cstr readelf-f (+ shstrbase name))))
               (setf (alist-get 'name shdr) name-str))))
         shdrs))))
 
 ;; offset is 1-indexed!
-(defun readelf--cstr (offset &optional max)
-  (let ((end offset)
-        (rem max))
-    (while (and
-            (/= (char-after end) 0)
-            (or (not rem) (> rem 0)))
-      (when rem (setq rem (1- rem)))
-      (setq end (1+ end)))
-    (when (/= (char-after end) 0)
-      (error "overflow"))
-    (buffer-substring-no-properties offset end)))
+;; (defun readelf--cstr (offset &optional max)
+;;   (let ((end offset)
+;;         (rem max))
+;;     (while (and
+;;             (/= (char-after end) 0)
+;;             (or (not rem) (> rem 0)))
+;;       (when rem (setq rem (1- rem)))
+;;       (setq end (1+ end)))
+;;     (when (/= (char-after end) 0)
+;;       (error "overflow"))
+;;     (buffer-substring-no-properties offset end)))
 
 
 (defun readelf--is-text (shdr)
@@ -522,9 +513,9 @@
     (unless (alist-get :syms readelf-symtab)
       (setf (alist-get :syms readelf-symtab) (readelf--read-symtab readelf-symtab))))
   (readelf--binsrch
-          (lambda (x)
-            (< addr (car x)))
-          readelf-symarray))
+   (lambda (x)
+     (< addr (car x)))
+   readelf-symarray))
 
 (defun readelf--symbolize (addr)  
   (let ((elt (readelf--getsym addr)))
@@ -548,87 +539,138 @@
     ))
 
 (defun readelf--symbolizable-addr (insn)
-  (let* ((mnemonic (intern (struct-capstone-insn-mnemonic insn)))
-         (pattern-and-idx (alist-get mnemonic readelf--arm64-operand-symbols))
-         (pattern (car pattern-and-idx))
-         (idx (cdr pattern-and-idx))
-         (ops (struct-capstone-insn-ops insn))
-         (p pattern)
-         (o ops)
-         fail
-         found
-         (i 0))
-    (while (or p o)
-      (let ((pn (car p))
-            (on (car o)))
-        (if (not (eq pn (car on)))
-            (setq fail t p nil o nil)
-          (when (= i idx)
-            (setq found (cadr on))))
-        (setq p (cdr p) o (cdr o) i (1+ i))))
-    (and (not fail) found)))
+  (cl-destructuring-bind (id address size bytes mnemonic opstr opcodes) insn
+    (let* ((mnemonic (intern mnemonic))
+           (pattern-and-idx (alist-get mnemonic readelf--arm64-operand-symbols))
+           (pattern (car pattern-and-idx))
+           (idx (cdr pattern-and-idx))
+           (p pattern)
+           (o opcodes)
+           fail
+           found
+           (i 0))
+      
+      (while (or p (< i (length o)))
+        (let ((pn (car p))
+              (on (and (< i (length o)) (elt o i))))
+          (if (not (eq pn (car on)))
+              (setq fail t p nil o nil)
+            (when (= i (or idx -1))
+              (setq found (cadr on))))
+          (setq p (cdr p) i (1+ i))))
+      (and (not fail) found))))
 
-(defun btv-fmtinsn (insn)
-  (let* ((size (struct-capstone-insn-size insn))
-         (mnemonic (struct-capstone-insn-mnemonic insn))
-         (opstr (struct-capstone-insn-op_str insn))
-         (address (struct-capstone-insn-address insn))
-         (bytes (struct-capstone-insn-bytes insn))
-         (symbolizable-addr (readelf--symbolizable-addr insn))
-         (symbolized
-          (and symbolizable-addr               
-               (readelf--symbolize symbolizable-addr))))
-    (propertize (format "%s %s %s%s\n"
-                        (propertize (format "0x%.8x:" address) 'font-lock-face 'readelf-disasm-addr)
-                        mnemonic
-                        opstr
-                        (if symbolized
-                            (concat (propertize " ; " 'font-lock-face 'font-lock-comment-face)
-                                    (propertize symbolized 'font-lock-face 'link))
-                          ""))
-                'readelf-disasm-position address
-                'readelf-disasm-link-target symbolizable-addr)))
+(defun btv-fmtinsn (insn &optional comment)
+  (cl-destructuring-bind (id address size bytes mnemonic opstr opcodes) insn
+    (let* ((symbolizable-addr (readelf--symbolizable-addr insn))
+           (symbolized
+            (and symbolizable-addr               
+                 (readelf--symbolize symbolizable-addr)))
+           (comment-str
+            (and (or comment symbolized)
+                 (let ((prefix (concat " ; " (or comment ""))))
+                   (concat (propertize prefix 'font-lock-face 'font-lock-comment-face)
+                           (and symbolized (propertize symbolized 'font-lock-face 'link)))))))
+      (propertize (format "%s %s %s%s\n"
+                          (propertize (format "0x%.8x:" address) 'font-lock-face 'readelf-disasm-addr)
+                          mnemonic
+                          opstr
+                          (or comment-str ""))
+                  'readelf-disasm-position address
+                  'readelf-disasm-link-target symbolizable-addr))))
+
+;; A and B are sorted pairs of non-overlapping integer intervals [x, y)
+(defun btv--interval-setminus (A B)
+  (let ((r nil))
+    (cl-flet ((put (lambda (x y)
+                     (let* ((top (car r))
+                            (new-r
+                             (cond
+                              ((>= x y) r)
+                              ((not r) `((,x . ,y)))
+                              ((= (cdr top) x) `((,(car top) . ,y) . ,(cdr r)))
+                              (t `((,x . ,y) . ,r)))))
+                       (setq r new-r)))))
+      (while A
+        (cl-destructuring-bind (ax . ay) (car A)
+          (if B
+              (cl-destructuring-bind (bx . by) (car B)
+                (cond
+                 ((<= ay bx)
+                  (put ax ay)                
+                  (setq A (cdr A)))
+                 ((<= by ax)
+                  (setq B (cdr B)))
+                 ((< ax bx)
+                  (put ax bx)
+                  (setq A `((,bx . ,ay) . ,(cdr A))))
+                 ((<= by ay)
+                  (setq B (cdr B))
+                  (setq A `((,by . ,ay) . ,(cdr A))))
+                 (t
+                  (setq A (cdr A)))))
+            (put ax ay)
+            (setq A (cdr A))))))
+    (nreverse r)))
+
+(defun readelf--disasm-code (code addr)
+  (let (break
+        (rb addr)
+        (len (readelf--code-len code))
+        (offset 0)
+        (n-insn 0)
+        (handle
+         (or (and (boundp 'readelf-disas-handle) readelf-disas-handle)
+             (setq-local readelf-disas-handle (capstone-open capstone-CS_ARCH_ARM64 capstone-CS_MODE_LITTLE_ENDIAN)))))
+    (cl-flet ((handle-insn (insn &optional comment)
+                (when (= 0 (% n-insn 1000))
+                  (message (format "formatting insn %d" n-insn)))
+                (setq n-insn (1+ n-insn))
+                (cl-destructuring-bind (id addr sz bytes mnemonic op-str opcodes) insn
+                  (let* ((sym (readelf--getsym addr))
+                         (f (btv-fmtinsn insn comment)))
+                    (setq rb (+ addr sz))
+                    (when (and sym (= (car sym) addr))
+                      (readelf--wcb buf (insert (format "%s:\n" (propertize (cdr sym) 'sym sym 'font-lock-face 'readelf-disasm-symbol-header)))))
+                    (readelf--wcb buf
+                                  (insert f))))))
+      (capstone-option handle capstone-CS_OPT_DETAIL capstone-CS_OPT_ON)
+      (while (not (or break (>= offset len)))
+        (let ((orig-rb rb))
+          (message (format "disas at 0x%x" rb))
+          (capstone-foreach-insn
+           #'handle-insn
+           code offset (- len offset) rb 0 handle)
+          (let ((total-consumed (- rb orig-rb)))
+            (setq offset
+                  (+ offset total-consumed))))        
+        (cl-destructuring-bind (synthetic-insn comment) (or (readelf--handle-bad-insn code offset rb) '(nil nil))
+          (if (not synthetic-insn)
+              (setq break t)
+            (cl-destructuring-bind (id address size bytes mnemonic op_str ops) synthetic-insn
+              (setq rb (+ address size))
+              (setq offset (+ offset size)))
+            (handle-insn synthetic-insn comment)))))
+    rb))
 
 (defun readelf--mk-disas-buf (shdr)
-  (let* ((start (1+ (alist-get 'offset shdr)))
+  (let* ((start (alist-get 'offset shdr))
          (sz (alist-get 'size shdr))
-         (end (+ start sz))
          (addr (alist-get 'addr shdr))
-         (ss (with-current-buffer readelf-fbuf (buffer-substring-no-properties start end)))
-         (code (capstone-vector-from-buffer readelf-fbuf (alist-get 'offset shdr) (alist-get 'size shdr)))
+         (ss (readelf--fread-to-code readelf-f start sz))
          (bufname (format "*disasm* %s" readelf-filename))
-         (buf (with-current-buffer (generate-new-buffer bufname)
-                (readelf-disasm-mode)
-                (setq-local readelf-disasm--extents `((,addr . ,(+ addr sz))))
-                (current-buffer)))
-         (handle
-          (or (and (boundp 'readelf-disas-handle) readelf-disas-handle)
-              (setq-local readelf-disas-handle (capstone-open capstone-CS_ARCH_ARM64 capstone-CS_MODE_LITTLE_ENDIAN)))))
-    (capstone-option handle capstone-CS_OPT_DETAIL capstone-CS_OPT_ON)
-    (capstone-with-disasm
-     (disas
-      code
-      addr
-      0
-      :arm64
-      nil
-      handle)
-     (mapc 
-      (lambda (insn)
-        (let* ((addr (struct-capstone-insn-address insn))
-               (sym (readelf--getsym addr)))
-          (when (and sym (= (car sym) addr))
-            (readelf--wcb buf (insert (format "%s:\n" (propertize (cdr sym) 'sym sym 'font-lock-face 'readelf-disasm-symbol-header))))))
-        (let ((f (btv-fmtinsn insn)))
-          (readelf--wcb buf
-            (insert f))))
-      (mapcar #'capstone-insn disas)))    
+         (buf (let ((me (current-buffer)))
+                (with-current-buffer (generate-new-buffer bufname)
+                  (readelf-disasm-mode)
+                  (setq-local readelf--backlink me)
+                  (current-buffer)))))
+    (let ((rb (readelf--disasm-code ss addr)))      
+      (with-current-buffer buf
+        (setq-local readelf-disasm--extents (and rb `((,addr . ,rb))))))    
     buf))
 
-;; TODO - check if capstone is available first?
 (defun readelf-jump-to-disasm (&optional force)
   (interactive)
-  (require 'emacs-capstone)
   (let* ((s (get-text-property (point) :shdr))
          (b
           (and s
@@ -651,13 +693,13 @@
   (interactive)
   (let* ((p (get-text-property (point) :phdr))
          (s (get-text-property (point) :shdr))
-         (x? (if p (readelf--expander/phdr p) (readelf--expander/shdr s)))
          (g (or p s))
+         (x? (and g (if p (readelf--expander/phdr p) (readelf--expander/shdr s))))
          (xx (and g (alist-get :expanded-extent g)))
          (hbegin (and g (car (alist-get :header g))))
          (hend (and g (cdr (alist-get :header g))))
          (inhibit-read-only t))
-    (when (and g x?)
+    (when x?
       (if xx
           ;; We are already expanded, so collapse
           (save-excursion
@@ -689,44 +731,55 @@
     (keymap-set map "d" #'readelf-jump-to-disasm)
     map))
 
-(defun readelf--delete-fbuf ()
-  (kill-buffer readelf-fbuf))
+(defun readelf--predict-langauge ()
+  (cond
+   ((readelf--named-section ".gopclntab") 'go)
+   (t nil)))
+
+(defun btv--le-decode (v)
+  (cl-loop
+   for byte across (reverse v)
+   for r = byte then (+ (* 256 r) byte)
+   finally return r
+   ))
+
+;; returns (x y) where `x' is the next instruction and `y' is a comment,
+;; if possible, or nil otherwise. Used to handle things
+;; capstone can't cope with.
+(defun readelf--handle-bad-insn (code offset addr)
+  (and (>= (- (readelf--code-len code) offset) 4)
+       (let ((bytes (readelf--code-substr code offset 4)))
+         (cond ((and (eq 'go readelf-predicted-language) (equal bytes "\x00\x17\xa7\xbe"))
+                `((nil ,addr 4 ,bytes ".syn" "" nil) "Go intentional illegal instruction"))
+               (t `((nil ,addr 4 ,bytes ".gibberish" "" nil) ,(format "0x%x" (btv--le-decode bytes))))))))
+
+(defun readelf--named-section (name)
+  (cl-find-if
+   (lambda (shdr)
+     (equal name
+            (alist-get 'name shdr)))
+   readelf-shdrs))
 
 (define-derived-mode readelf-mode special-mode "Readelf Mode"
   :interactive nil
   (buffer-disable-undo)
-  (add-hook 'kill-buffer-hook #'readelf--delete-fbuf nil t)
   (setq buffer-read-only t)
-  (let* ((fbuf
-          ;; TODO - is there a way to avoid reading the
-          ;; whole file into a buffer?
-          (generate-new-buffer " *readelf internal*" t))
-         (h (with-current-buffer fbuf
-              (set-buffer-multibyte nil)
-              (let ((coding-system-for-read 'binary))
-                (insert-file-contents-literally filename))
-              (readelf-validate-header (readelf-get-header)))))
+  (let* ((f (readelf--fopen filename))
+         (h (readelf-validate-header (readelf-get-header (readelf--fread f 0 64)))))
     (setq-local readelf-header h)
-    (setq-local readelf-fbuf fbuf))
+    (setq-local readelf-f f))
   (setq-local readelf-phdrs (readelf--get-phdrs))
   (setq-local readelf-shdrs (readelf--get-shdrs))
 
   (setq-local readelf-strtab
-              (cl-find-if
-               (lambda (shdr)
-                 (equal ".strtab"
-                        (alist-get 'name shdr)))
-               readelf-shdrs))
+              (readelf--named-section ".strtab"))
 
   (setq-local readelf-symtab
-              (cl-find-if
-               (lambda (shdr)
-                 (equal ".symtab"
-                        (alist-get 'name shdr)))
-               readelf-shdrs))
+              (readelf--named-section ".symtab"))
   
   (setq-local readelf-filename filename)
   (setq-local readelf-symarray [])
+  (setq-local readelf-predicted-language (readelf--predict-langauge))
   
   (let* ((print-length nil)
          (inhibit-read-only t)
@@ -747,6 +800,5 @@
     (with-current-buffer buf
       (readelf-mode)      
       (switch-to-buffer buf)
-      (goto-char (point-min))
-      )))
+      (goto-char (point-min)))))
 
