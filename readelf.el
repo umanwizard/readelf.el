@@ -95,7 +95,8 @@
     (error "bad elf ident version"))
   (unless (= (cdr (assq 'ehsize h)) 64)
     (error "bad elf header size"))
-  (unless (>= (cdr (assq 'phentsize h)) 56)
+  (unless (or (= (cdr (assq 'phnum h)) 0)
+              (>= (cdr (assq 'phentsize h)) 56))
     (error "bad ph entry size"))
   (unless (>= (cdr (assq 'shentsize h)) 64)
     (error "bad sh entry size"))
@@ -131,7 +132,7 @@
                  (STT_FUNC 2)
                  (STT_SECTION 3)
                  (STT_FILE 4)
-                 (STT_FILE 5)
+                 (STT_COMMON 5)
                  (STT_TLS 6)
                  (STT_NUM 7)
                  (STT_LOOS 10)
@@ -359,9 +360,10 @@
              (equal name "")
              ;; [btv] IDK if this is the right way to filter symbols.
              ;; Check what nm does.
-             (= (alist-get 'value sym) 0)
+             ;; (= (alist-get 'value sym) 0)
              (eq (alist-get 'other sym) readelf--symviz/STV_INTERNAL)
-             (eq (alist-get 'info sym) readelf--symtype/STT_NOTYPE))
+             ;; (eq (alist-get 'info sym) readelf--symtype/STT_NOTYPE)
+             )
           (setf (alist-get 'name sym) name)
           (setq rsyms `(,sym . ,rsyms)))))
     (setq-local readelf-symarray
@@ -619,19 +621,37 @@
         (len (readelf--code-len code))
         (offset 0)
         (n-insn 0)
+        (symidx 0)
+        (symmax (progn
+                  (when readelf-symtab
+                    (unless (alist-get :syms readelf-symtab)
+                      (setf (alist-get :syms readelf-symtab) (readelf--read-symtab readelf-symtab))))
+                  (let ((syms (alist-get :syms readelf-symtab)))
+                    (if syms (length syms) 0))))
         (handle
          (or (and (boundp 'readelf-disas-handle) readelf-disas-handle)
              (setq-local readelf-disas-handle (capstone-open capstone-CS_ARCH_ARM64 capstone-CS_MODE_LITTLE_ENDIAN)))))
+    
     (cl-flet ((handle-insn (insn &optional comment)
                 (when (= 0 (% n-insn 1000))
                   (message (format "formatting insn %d" n-insn)))
                 (setq n-insn (1+ n-insn))
+                
                 (cl-destructuring-bind (id addr sz bytes mnemonic op-str opcodes) insn
-                  (let* ((sym (readelf--getsym addr))
-                         (f (btv-fmtinsn insn comment)))
+                  (let (sym
+                        break
+                        (f (btv-fmtinsn insn comment)))
+                    (while (not break)
+                      (setq sym (and (< symidx symmax) (elt readelf-symarray symidx)))
+                      (if (or (not sym) (>= (car sym) addr))
+                          (setq break t)
+                        (setq symidx (1+ symidx))))
                     (setq rb (+ addr sz))
                     (when (and sym (= (car sym) addr))
                       (readelf--wcb buf (insert (format "%s:\n" (propertize (cdr sym) 'sym sym 'font-lock-face 'readelf-disasm-symbol-header)))))
+                    ;; XXX this is wrong
+                    (when (and sym (< (car sym) addr))
+                      (setq symidx (1+ symidx)))
                     (readelf--wcb buf
                                   (insert f))))))
       (capstone-option handle capstone-CS_OPT_DETAIL capstone-CS_OPT_ON)

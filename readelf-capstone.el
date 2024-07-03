@@ -5,18 +5,9 @@
 (defun capstone-foreach-insn (f code start len addr count handle)
   ;; XXX[btv] -- assertions
   (let* ((disas (capstone--cs-disasm handle code start len addr count))
-         (n (length (car disas))))
+         )
     (when disas
-      (cl-destructuring-bind (ids addrs sizes bytess mnemonics op-strs opcodess) disas
-        (dotimes (i n)
-          (let ((id (elt ids i))
-                (addr (elt addrs i))
-                (size (elt sizes i))
-                (bytes (elt bytess i))
-                (mnemonic (elt mnemonics i))
-                (op-str (elt op-strs i))
-                (opcodes (elt opcodess i)))
-            (funcall f (list id addr size bytes mnemonic op-str opcodes))))))))
+      (readelf--foreach-insn f disas))))
 
 ;; XXX[btv] Do error handling in a better way than checking against a fixed list
 ;; Capstone error type

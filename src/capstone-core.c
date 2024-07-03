@@ -88,6 +88,7 @@ elf_file_finalizer(void *obj)
     elf_file *ef = (elf_file *)obj;
     if (ef && ef->f)
         fclose(ef->f);
+    free(ef);
 }
 
 // XXX[btv] - expose
@@ -130,6 +131,7 @@ re_bytes_finalizer(void *obj)
     re_bytes *p_bytes = (re_bytes *)obj;
     if (p_bytes && p_bytes->buf)
         free(p_bytes->buf);
+    free(p_bytes);
 }
 
 static re_bytes
@@ -416,6 +418,18 @@ Fcall_cs_group_name(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *d
     }
 }
 
+typedef struct {
+    cs_insn *insns;
+    size_t n;
+} re_insn_block;
+
+void re_insn_block_finalizer(void *obj) {
+    re_insn_block *reib = (re_insn_block *)obj;
+    assert(reib && reib->insns);
+    cs_free(reib->insns, reib->n);
+    free(reib);
+}
+
 static emacs_value
 Fcall_cs_disasm(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data)
 {
@@ -453,43 +467,127 @@ Fcall_cs_disasm(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data)
         return _CS_NIL();
     }
 
-    // (make-vector ret nil)
-    emacs_value vector_args[2];
-    vector_args[0] = _CS_INT(ret);
-    vector_args[1] = _CS_NIL();
+    re_insn_block *reib = malloc(sizeof(*reib));
+    if (!reib) {
+        _CS_SIGNAL("readelf-oom", _CS_NIL());
+        return _CS_NIL();
+    }
+    reib->insns = insn;
+    reib->n = ret;
 
-    emacs_value id_vec = _CS_FUNCALL("make-vector", vector_args);
-    emacs_value addr_vec = _CS_FUNCALL("make-vector", vector_args);
-    emacs_value size_vec = _CS_FUNCALL("make-vector", vector_args);
-    emacs_value bytes_vec = _CS_FUNCALL("make-vector", vector_args);
-    emacs_value mnemonic_vec = _CS_FUNCALL("make-vector", vector_args);
-    emacs_value op_str_vec = _CS_FUNCALL("make-vector", vector_args);
-    emacs_value opcodes_vec = _CS_FUNCALL("make-vector", vector_args);
+    return _CS_UPTR(re_insn_block_finalizer, reib);
 
-    // TODO[btv] - Profile disasm. Can it be made faster?
-    // Or should we port more stuff from lisp to C?
-    for (int i = 0; i < ret; ++i) {
-        _CS_VEC_SET(id_vec, i, _CS_INT(insn[i].id));
-        _CS_VEC_SET(addr_vec, i, _CS_INT(insn[i].address));
-        _CS_VEC_SET(size_vec, i, _CS_INT(insn[i].size));
-        _CS_VEC_SET(bytes_vec, i, _CS_UNIBYTE_STRING((char *)insn[i].bytes, insn[i].size));
-        _CS_VEC_SET(mnemonic_vec, i, _CS_STRING(insn[i].mnemonic, strlen(insn[i].mnemonic)));
-        _CS_VEC_SET(op_str_vec, i, _CS_STRING(insn[i].op_str, strlen(insn[i].op_str)));
-        // XXX[btv] - Support other arches and also
-        // check to make sure detail is on and skipdata is off.
-        //
-        // This probably requires us to interpose calls to cs_open and cs_option to
-        // track this.
-        if (insn[i].detail) {
+    /* // (make-vector ret nil) */
+    /* emacs_value vector_args[2]; */
+    /* vector_args[0] = _CS_INT(ret); */
+    /* vector_args[1] = _CS_NIL(); */
+
+    /* emacs_value id_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /* emacs_value addr_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /* emacs_value size_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /* emacs_value bytes_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /* emacs_value mnemonic_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /* emacs_value op_str_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /* emacs_value opcodes_vec = _CS_FUNCALL("make-vector", vector_args); */
+
+    /* // TODO[btv] - Profile disasm. Can it be made faster? */
+    /* // Or should we port more stuff from lisp to C? */
+    /* for (int i = 0; i < ret; ++i) { */
+    /*     _CS_VEC_SET(id_vec, i, _CS_INT(insn[i].id)); */
+    /*     _CS_VEC_SET(addr_vec, i, _CS_INT(insn[i].address)); */
+    /*     _CS_VEC_SET(size_vec, i, _CS_INT(insn[i].size)); */
+    /*     _CS_VEC_SET(bytes_vec, i, _CS_UNIBYTE_STRING((char *)insn[i].bytes, insn[i].size)); */
+    /*     _CS_VEC_SET(mnemonic_vec, i, _CS_STRING(insn[i].mnemonic, strlen(insn[i].mnemonic))); */
+    /*     _CS_VEC_SET(op_str_vec, i, _CS_STRING(insn[i].op_str, strlen(insn[i].op_str))); */
+    /*     // XXX[btv] - Support other arches and also */
+    /*     // check to make sure detail is on and skipdata is off. */
+    /*     // */
+    /*     // This probably requires us to interpose calls to cs_open and cs_option to */
+    /*     // track this. */
+    /*     if (insn[i].detail) { */
+    /*         emacs_value vector_args[2]; */
+    /*         vector_args[0] = _CS_INT(insn[i].detail->arm64.op_count); */
+    /*         vector_args[1] = _CS_NIL(); */
+    /*         emacs_value ops_vec = _CS_FUNCALL("make-vector", vector_args); */
+    /*         for (int x = 0; x < insn[i].detail->arm64.op_count; ++x) { */
+    /*             cs_arm64_op *op = &insn[i].detail->arm64.operands[x];            */
+
+    /*             emacs_value op_list; */
+    /*             // TODO[btv] use something faster than lists here. */
+    /*             switch (op->type) { */
+    /*             case ARM64_OP_REG: { */
+    /*                 emacs_value list_args[2]; */
+    /*                 list_args[0] = _CS_INTERN("reg"); */
+    /*                 // TODO[btv] symbolic register names */
+    /*                 list_args[1] = _CS_INT(op->reg); */
+    /*                 op_list = _CS_FUNCALL("vector", list_args); */
+    /*             } */
+    /*                 break; */
+    /*             case ARM64_OP_IMM: { */
+    /*                 emacs_value list_args[2]; */
+    /*                 list_args[0] = _CS_INTERN("imm"); */
+    /*                 list_args[1] = _CS_INT(op->imm); */
+    /*                 op_list = _CS_FUNCALL("vector", list_args); */
+    /*             } */
+    /*                 break; */
+    /*             case ARM64_OP_MEM: { */
+    /*                 emacs_value list_args[4]; */
+    /*                 list_args[0] = _CS_INTERN("mem"); */
+    /*                 list_args[1] = _CS_INT(op->mem.base); */
+    /*                 list_args[2] = _CS_INT(op->mem.index); */
+    /*                 list_args[3] = _CS_INT(op->mem.disp); */
+    /*                 op_list = _CS_FUNCALL("vector", list_args); */
+    /*             } */
+    /*                 break; */
+    /*             default: */
+    /*                 op_list = _CS_NIL(); */
+    /*             } */
+
+    /*             _CS_VEC_SET(ops_vec, x, op_list); */
+    /*         } */
+    /*         _CS_VEC_SET(opcodes_vec, i, ops_vec); */
+    /*     } */
+    /* } */
+
+    /* /\* we're done at the native layer with this stuff, so free it *\/ */
+    /* cs_free(insn, ret); */
+    
+    /* emacs_value list_args[7]; */
+    /* list_args[0] = id_vec; */
+    /* list_args[1] = addr_vec; */
+    /* list_args[2] = size_vec; */
+    /* list_args[3] = bytes_vec; */
+    /* list_args[4] = mnemonic_vec; */
+    /* list_args[5] = op_str_vec; */
+    /* list_args[6] = opcodes_vec;         */
+    
+    /* return _CS_FUNCALL("list", list_args); */
+}
+
+static emacs_value
+Fcall_re_foreach_insn(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data)
+{
+    re_insn_block *reib = _CS_UPTR_GET(args[1]);
+    emacs_value f = args[0];
+
+    for (size_t i = 0; i < reib->n; ++i) {
+        cs_insn *insn = &reib->insns[i];
+        emacs_value id = _CS_INT(insn->id);
+        emacs_value addr = _CS_INT(insn->address);
+        emacs_value size = _CS_INT(insn->size);
+        emacs_value bytes = _CS_UNIBYTE_STRING((char *)insn->bytes, insn->size);
+        emacs_value mnemonic = _CS_STRING(insn->mnemonic, strlen(insn->mnemonic));
+        emacs_value op_str = _CS_STRING(insn->op_str, strlen(insn->op_str));
+        emacs_value ops_vec = _CS_NIL();
+        if (insn->detail) {
             emacs_value vector_args[2];
-            vector_args[0] = _CS_INT(insn[i].detail->arm64.op_count);
+            vector_args[0] = _CS_INT(insn->detail->arm64.op_count);
             vector_args[1] = _CS_NIL();
-            emacs_value ops_vec = _CS_FUNCALL("make-vector", vector_args);
-            for (int x = 0; x < insn[i].detail->arm64.op_count; ++x) {
-                cs_arm64_op *op = &insn[i].detail->arm64.operands[x];           
+            ops_vec = _CS_FUNCALL("make-vector", vector_args);
+            for (int x = 0; x < insn->detail->arm64.op_count; ++x) {
+                cs_arm64_op *op = &insn->detail->arm64.operands[x];
 
                 emacs_value op_list;
-                // TODO[btv] use something faster than lists here.
                 switch (op->type) {
                 case ARM64_OP_REG: {
                     emacs_value list_args[2];
@@ -521,24 +619,14 @@ Fcall_cs_disasm(emacs_env *env, ptrdiff_t nargs, emacs_value args[], void *data)
 
                 _CS_VEC_SET(ops_vec, x, op_list);
             }
-            _CS_VEC_SET(opcodes_vec, i, ops_vec);
         }
+        emacs_value list_args[7] = {id, addr, size, bytes, mnemonic, op_str, ops_vec};
+        emacs_value list = _CS_FUNCALL("list", list_args);
+        env->funcall(env, f, 1, &list);
     }
-
-    /* we're done at the native layer with this stuff, so free it */
-    cs_free(insn, ret);
-    
-    emacs_value list_args[7];
-    list_args[0] = id_vec;
-    list_args[1] = addr_vec;
-    list_args[2] = size_vec;
-    list_args[3] = bytes_vec;
-    list_args[4] = mnemonic_vec;
-    list_args[5] = op_str_vec;
-    list_args[6] = opcodes_vec;        
-    
-    return _CS_FUNCALL("list", list_args);
+    return _CS_NIL();
 }
+
 
 /* bind c_func (native) to e_func (elisp) */
 static void
@@ -616,7 +704,7 @@ emacs_module_init(struct emacs_runtime *ert)
     
     bind(env,
          Fcall_cs_disasm, "capstone--cs-disasm", 6, 6,
-        "Using cs HANDLE disassemble CODE object from START for LEN bytes labeled as starting at ADDRESS for COUNT number of instructions (0 for all)",
+        "Using cs HANDLE disassemble CODE object from START for LEN bytes labeled as starting at ADDRESS for COUNT number of instructions (0 for all), returning insn block",
         NULL);
 
     bind(env,
@@ -643,6 +731,10 @@ emacs_module_init(struct emacs_runtime *ert)
     bind(env,
          Fcall_re_code_substr, "readelf--code-substr", 3, 3,
          "From opaque CODE object, return the bytes at START and max length SIZE",
+         NULL);
+    bind(env,
+         Fcall_re_foreach_insn, "readelf--foreach-insn", 2, 2,
+         "Call FUNCTION on each instruction in INSN-BLOCK",
          NULL);
 
     emacs_value provide_args[1];
